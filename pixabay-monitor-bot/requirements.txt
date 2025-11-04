@@ -1,4 +1,0 @@
-pytelegrambotapi
-beautifulsoup4
-requests
-lxml

@@ -1,19 +1,21 @@
-import requests
+import os
 import time
-from bs4 import BeautifulSoup
 import json
+import requests
+from bs4 import BeautifulSoup
 import telebot
+from threading import Thread
 
 # === НАСТРОЙКИ ===
-PIXABAY_USER_URL = "https://pixabay.com/users/sountrixaudio-52768843/"   # <-- вставь свой URL
-CHECK_INTERVAL = 300  # интервал проверки в секундах (каждые 5 минут)
-BOT_TOKEN = "8568244160:AAGrGu8fYuop1qUPPffgmlNvnX_IO6lhr3Q"
-CHAT_ID = "659461309"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")  # строкой ок
+PIXABAY_USER_URL = os.getenv("PIXABAY_USER_URL")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # сек, можно задать в Render
+
 HISTORY_FILE = "published_history.json"
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-bot = telebot.TeleBot(BOT_TOKEN)
-
-
+# ---------- утилиты ----------
 def load_history():
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -21,47 +23,68 @@ def load_history():
     except:
         return []
 
-
 def save_history(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
+def fetch_track_urls():
+    r = requests.get(PIXABAY_USER_URL, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "lxml")
+    # селектор может меняться — при необходимости подправь:
+    items = soup.select("a.link--h3bPW")
+    return ["https://pixabay.com" + i["href"] for i in items]
 
-def get_published_tracks():
-    response = requests.get(PIXABAY_USER_URL)
-    soup = BeautifulSoup(response.text, "html.parser")
+def send(msg):
+    try:
+        bot.send_message(CHAT_ID, msg)
+    except Exception as e:
+        print("Send error:", e, flush=True)
 
-    items = soup.select("a.link--h3bPW")  # карточки работ
-    track_urls = ["https://pixabay.com" + i["href"] for i in items]
-
-    return track_urls
-
-
-def notify_new_track(url):
-    message = f"✅ Новый трек опубликован!\n{url}"
-    bot.send_message(CHAT_ID, message)
-
-
-def main():
-    print("✅ BOT STARTED")
+def check_once():
+    print("Checking Pixabay…", flush=True)
     history = load_history()
+    current = fetch_track_urls()
+    new_items = [u for u in current if u not in history]
+    if new_items:
+        for url in new_items:
+            send(f"✅ Новый трек опубликован!\n{url}")
+            history.append(url)
+        save_history(history)
+    else:
+        print("No new tracks.", flush=True)
+
+# ---------- приём команд ----------
+@bot.message_handler(commands=["start", "ping"])
+def ping(m):
+    bot.reply_to(m, "✅ Бот активен. Проверяю каждые {} сек.".format(CHECK_INTERVAL))
+
+@bot.message_handler(commands=["check"])
+def manual_check(m):
+    bot.reply_to(m, "⏳ Запускаю ручную проверку…")
+    try:
+        check_once()
+        bot.reply_to(m, "✅ Проверка завершена.")
+    except Exception as e:
+        bot.reply_to(m, f"⚠️ Ошибка: {e}")
+
+def run_polling():
+    # отдельный поток для приёма сообщений, чтобы не мешать циклу
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+# ---------- основной цикл ----------
+def main():
+    print("✅ BOT STARTED", flush=True)
+    send("🤖 Бот запущен. Мониторинг активен.")
+    Thread(target=run_polling, daemon=True).start()
 
     while True:
         try:
-            current_tracks = get_published_tracks()
-
-            for track in current_tracks:
-                if track not in history:
-                    history.append(track)
-                    notify_new_track(track)
-
-            save_history(history)
-
+            check_once()
         except Exception as e:
-            bot.send_message(CHAT_ID, f"⚠️ Ошибка: {e}")
-
+            print("Loop error:", e, flush=True)
+            send(f"⚠️ Ошибка мониторинга: {e}")
         time.sleep(CHECK_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
